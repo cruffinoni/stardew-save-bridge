@@ -1,0 +1,4 @@
+config/user.json
+logs/
+backups/
+staging/

@@ -1,0 +1,14 @@
+{
+  "androidSaveRoot": "/sdcard/Android/data/com.chucklefish.stardewvalley/files/Saves",
+  "adbPath": "adb",
+  "backupRoot": "backups",
+  "retentionCount": 5,
+  "stagingDirectory": "staging",
+  "preferredSaveSlot": "",
+  "preferredDeviceId": "",
+  "uiMode": "Text",
+  "allowUnsafeOverride": false,
+  "pcGameExePath": "",
+  "phonePackageName": "com.chucklefish.stardewvalley",
+  "logRoot": "logs"
+}
