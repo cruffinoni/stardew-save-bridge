@@ -378,6 +378,65 @@ function Get-VerificationSummaryLine {
     }
 }
 
+function Get-PreservedSettingsSummaryLine {
+    param(
+        [Parameter(Mandatory)]
+        $PreservationResult
+    )
+
+    if (-not $PreservationResult.Applied) {
+        return $null
+    }
+
+    return 'Preserved existing {0} settings while replacing the save.' -f $PreservationResult.TargetSide
+}
+
+function New-EffectiveTransferPayload {
+    param(
+        [Parameter(Mandatory)]
+        [hashtable]$Config,
+
+        [Parameter(Mandatory)]
+        [string]$Purpose,
+
+        [Parameter(Mandatory)]
+        [string]$SlotName,
+
+        [Parameter(Mandatory)]
+        [string]$IncomingSlotPath,
+
+        [string]$CurrentTargetSlotPath,
+
+        [Parameter(Mandatory)]
+        [ValidateSet('PC', 'Phone')]
+        [string]$TargetSide
+    )
+
+    if (-not $CurrentTargetSlotPath) {
+        return [pscustomobject]@{
+            Path = $IncomingSlotPath
+            Applied = $false
+            AppliedCount = 0
+            CandidateCount = 0
+            TargetSide = $TargetSide
+            ReferencePath = $null
+        }
+    }
+
+    $payloadPath = New-StagingSlotPath -Config $Config -Purpose $Purpose -SlotName $SlotName
+    Copy-BridgeDirectory -SourcePath $IncomingSlotPath -TargetPath $payloadPath -CleanTarget
+    $syncResult = Sync-SaveSettingsFromReference -ReferenceFolderPath $CurrentTargetSlotPath -TargetFolderPath $payloadPath
+
+    return [pscustomobject]@{
+        Path = $payloadPath
+        Applied = $syncResult.Applied
+        AppliedCount = $syncResult.AppliedCount
+        CandidateCount = $syncResult.CandidateCount
+        TargetSide = $TargetSide
+        ReferencePath = $CurrentTargetSlotPath
+    }
+}
+
 function Warn-IfStardewRunning {
     $candidates = @('Stardew Valley', 'StardewValley')
     $running = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $candidates -contains $_.ProcessName })
@@ -397,7 +456,7 @@ function Invoke-InspectWorkflow {
 
         [switch]$NonInteractive,
 
-        [hashtable]$RunRecord
+        [System.Collections.IDictionary]$RunRecord
     )
 
     $device = Resolve-SelectedDevice -Config $Config -RequestedDeviceId $RequestedDeviceId -NonInteractive:$NonInteractive
@@ -487,7 +546,7 @@ function Invoke-UsePCWorkflow {
 
         [switch]$NonInteractive,
 
-        [hashtable]$RunRecord
+        [System.Collections.IDictionary]$RunRecord
     )
 
     $device = Resolve-SelectedDevice -Config $Config -RequestedDeviceId $RequestedDeviceId -NonInteractive:$NonInteractive
@@ -562,8 +621,16 @@ function Invoke-UsePCWorkflow {
         Invoke-BridgeBackupPrune -SlotName $slotName -TargetSide 'Phone' -BackupRoot $Config.backupRoot -RetentionCount $Config.retentionCount -DryRun:$DryRun | Out-Null
     }
 
+    $effectivePayload = New-EffectiveTransferPayload `
+        -Config $Config `
+        -Purpose 'usepc-effective' `
+        -SlotName $slotName `
+        -IncomingSlotPath $pcPath `
+        -CurrentTargetSlotPath $stagedPhonePath `
+        -TargetSide 'Phone'
+
     if (-not $DryRun) {
-        Copy-LocalSaveToPhone -Config $Config -DeviceId $device.Id -LocalSlotPath $pcPath
+        Copy-LocalSaveToPhone -Config $Config -DeviceId $device.Id -LocalSlotPath $effectivePayload.Path
     }
 
     $verifyPath = New-StagingSlotPath -Config $Config -Purpose 'phone-verify' -SlotName $slotName
@@ -575,7 +642,7 @@ function Invoke-UsePCWorkflow {
         [ordered]@{ Status = 'DryRun'; Reason = 'Verification skipped in dry-run mode.' }
     }
     else {
-        $verifyComparison = Compare-SaveFolders -PCPath $pcPath -PhonePath $verifyPath
+        $verifyComparison = Compare-SaveFolders -PCPath $effectivePayload.Path -PhonePath $verifyPath
         [ordered]@{
             Status = if ($verifyComparison.OverallStatus -eq 'Identical') { 'Succeeded' } else { 'Failed' }
             Summary = $verifyComparison.Summary
@@ -593,12 +660,14 @@ function Invoke-UsePCWorkflow {
         pcSlot = $pcPath
         phoneSlot = $androidSaveRoot.TrimEnd('/') + '/' + $slotName
         stagingPhoneSlot = $stagedPhonePath
+        effectivePayload = $effectivePayload.Path
         verificationSlot = $verifyPath
     }
     $RunRecord.compatibility = $compatibility
     $RunRecord.backupResult = $backupResult
     $RunRecord.comparisonSummary = $comparison.Summary
     $RunRecord.overwriteTarget = 'Phone'
+    $RunRecord.preservedSettings = $effectivePayload
     $RunRecord.verificationResult = $verification
 
     return [pscustomobject]@{
@@ -614,9 +683,10 @@ function Invoke-UsePCWorkflow {
             "Selected save slot: $slotName"
             (Get-BackupSummaryLine -BackupResult $backupResult -NoBackupNeededMessage 'No existing phone save was found, so no backup was needed.')
             (Get-TargetActionSummaryLine -Side 'Phone' -TargetExists:$phoneExists -DryRun:$DryRun)
+            (Get-PreservedSettingsSummaryLine -PreservationResult $effectivePayload)
             "Compatibility: $($compatibility.Status) - $($compatibility.Reason)"
             (Get-VerificationSummaryLine -VerificationResult $verification)
-        )
+        ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
     }
 }
 
@@ -635,7 +705,7 @@ function Invoke-UsePhoneWorkflow {
 
         [switch]$NonInteractive,
 
-        [hashtable]$RunRecord
+        [System.Collections.IDictionary]$RunRecord
     )
 
     $device = Resolve-SelectedDevice -Config $Config -RequestedDeviceId $RequestedDeviceId -NonInteractive:$NonInteractive
@@ -706,15 +776,23 @@ function Invoke-UsePhoneWorkflow {
     }
 
     $targetPcPath = Join-Path -Path $pcRoot -ChildPath $slotName
+    $effectivePayload = New-EffectiveTransferPayload `
+        -Config $Config `
+        -Purpose 'usephone-effective' `
+        -SlotName $slotName `
+        -IncomingSlotPath $stagedPhonePath `
+        -CurrentTargetSlotPath $pcPath `
+        -TargetSide 'PC'
+
     if (-not $DryRun) {
-        Copy-BridgeDirectory -SourcePath $stagedPhonePath -TargetPath $targetPcPath -CleanTarget
+        Copy-BridgeDirectory -SourcePath $effectivePayload.Path -TargetPath $targetPcPath -CleanTarget
     }
 
     $verification = if ($DryRun) {
         [ordered]@{ Status = 'DryRun'; Reason = 'Verification skipped in dry-run mode.' }
     }
     else {
-        $verifyComparison = Compare-SaveFolders -PCPath $targetPcPath -PhonePath $stagedPhonePath
+        $verifyComparison = Compare-SaveFolders -PCPath $targetPcPath -PhonePath $effectivePayload.Path
         [ordered]@{
             Status = if ($verifyComparison.OverallStatus -eq 'Identical') { 'Succeeded' } else { 'Failed' }
             Summary = $verifyComparison.Summary
@@ -732,11 +810,13 @@ function Invoke-UsePhoneWorkflow {
         pcSlot = $targetPcPath
         phoneSlot = $androidSaveRoot.TrimEnd('/') + '/' + $slotName
         stagingPhoneSlot = $stagedPhonePath
+        effectivePayload = $effectivePayload.Path
     }
     $RunRecord.compatibility = $compatibility
     $RunRecord.backupResult = $backupResult
     $RunRecord.comparisonSummary = $comparison.Summary
     $RunRecord.overwriteTarget = 'PC'
+    $RunRecord.preservedSettings = $effectivePayload
     $RunRecord.verificationResult = $verification
 
     return [pscustomobject]@{
@@ -752,9 +832,10 @@ function Invoke-UsePhoneWorkflow {
             "Selected save slot: $slotName"
             (Get-BackupSummaryLine -BackupResult $backupResult -NoBackupNeededMessage 'No existing PC save was found, so no backup was needed.')
             (Get-TargetActionSummaryLine -Side 'PC' -TargetExists:([bool]$pcPath) -DryRun:$DryRun)
+            (Get-PreservedSettingsSummaryLine -PreservationResult $effectivePayload)
             "Compatibility: $($compatibility.Status) - $($compatibility.Reason)"
             (Get-VerificationSummaryLine -VerificationResult $verification)
-        )
+        ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
     }
 }
 
@@ -778,7 +859,7 @@ function Invoke-RestoreWorkflow {
 
         [switch]$NonInteractive,
 
-        [hashtable]$RunRecord
+        [System.Collections.IDictionary]$RunRecord
     )
 
     $backupSlots = @(Get-BackupSlotNames -BackupRoot $Config.backupRoot)
@@ -826,7 +907,7 @@ function Invoke-RestoreWorkflow {
         (Select-BridgeItem -Items $options -Title 'Choose a restore target' -LabelScript { param($item) $item.Label } -UiMode $Config.uiMode -NonInteractive:$NonInteractive).Value
     }
 
-    if (-not (Confirm-BridgeAction -Message "Restore backup $($backup.Id) to $targetSide? A backup of the overwritten side will be created first." -Force:$Force -NonInteractive:$NonInteractive)) {
+    if (-not (Confirm-BridgeAction -Message "Restore backup $($backup.Id) to $($targetSide)? A backup of the overwritten side will be created first." -Force:$Force -NonInteractive:$NonInteractive)) {
         return [pscustomobject]@{
             ExitCode = 1
             FinalOutcome = 'Canceled'
@@ -891,12 +972,20 @@ function Invoke-RestoreWorkflow {
         Invoke-BridgeBackupPrune -SlotName $slotName -TargetSide $targetSide -BackupRoot $Config.backupRoot -RetentionCount $Config.retentionCount -DryRun:$DryRun | Out-Null
     }
 
+    $effectivePayload = New-EffectiveTransferPayload `
+        -Config $Config `
+        -Purpose ('restore-{0}-effective' -f $targetSide.ToLowerInvariant()) `
+        -SlotName $slotName `
+        -IncomingSlotPath $backup.ContentPath `
+        -CurrentTargetSlotPath $currentTargetPath `
+        -TargetSide $targetSide
+
     if (-not $DryRun) {
         if ($targetSide -eq 'PC') {
-            Copy-BridgeDirectory -SourcePath $backup.ContentPath -TargetPath $targetPath -CleanTarget
+            Copy-BridgeDirectory -SourcePath $effectivePayload.Path -TargetPath $targetPath -CleanTarget
         }
         else {
-            Copy-LocalSaveToPhone -Config $Config -DeviceId $device.Id -LocalSlotPath $backup.ContentPath
+            Copy-LocalSaveToPhone -Config $Config -DeviceId $device.Id -LocalSlotPath $effectivePayload.Path
         }
     }
 
@@ -904,7 +993,7 @@ function Invoke-RestoreWorkflow {
         [ordered]@{ Status = 'DryRun'; Reason = 'Verification skipped in dry-run mode.' }
     }
     elseif ($targetSide -eq 'PC') {
-        $verifyComparison = Compare-SaveFolders -PCPath $targetPath -PhonePath $backup.ContentPath
+        $verifyComparison = Compare-SaveFolders -PCPath $targetPath -PhonePath $effectivePayload.Path
         [ordered]@{
             Status = if ($verifyComparison.OverallStatus -eq 'Identical') { 'Succeeded' } else { 'Failed' }
             Summary = $verifyComparison.Summary
@@ -913,7 +1002,7 @@ function Invoke-RestoreWorkflow {
     else {
         $verifyPath = New-StagingSlotPath -Config $Config -Purpose 'restore-phone-verify' -SlotName $slotName
         Copy-PhoneSaveToLocal -Config $Config -DeviceId $device.Id -SlotName $slotName -TargetPath $verifyPath | Out-Null
-        $verifyComparison = Compare-SaveFolders -PCPath $backup.ContentPath -PhonePath $verifyPath
+        $verifyComparison = Compare-SaveFolders -PCPath $effectivePayload.Path -PhonePath $verifyPath
         [ordered]@{
             Status = if ($verifyComparison.OverallStatus -eq 'Identical') { 'Succeeded' } else { 'Failed' }
             Summary = $verifyComparison.Summary
@@ -929,9 +1018,11 @@ function Invoke-RestoreWorkflow {
     $RunRecord.detectedPaths = [ordered]@{
         backupContent = $backup.ContentPath
         target = $targetPath
+        effectivePayload = $effectivePayload.Path
     }
     $RunRecord.backupResult = $preRestoreBackup
     $RunRecord.overwriteTarget = $targetSide
+    $RunRecord.preservedSettings = $effectivePayload
     $RunRecord.verificationResult = $verification
 
     return [pscustomobject]@{
@@ -948,8 +1039,9 @@ function Invoke-RestoreWorkflow {
             "Restore target: $targetSide"
             (Get-BackupSummaryLine -BackupResult $preRestoreBackup -NoBackupNeededMessage 'No existing target save was found, so no backup was needed before restore.')
             (Get-TargetActionSummaryLine -Side $targetSide -TargetExists:([bool]$currentTargetPath) -DryRun:$DryRun)
+            (Get-PreservedSettingsSummaryLine -PreservationResult $effectivePayload)
             (Get-VerificationSummaryLine -VerificationResult $verification)
-        )
+        ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
     }
 }
 
@@ -979,7 +1071,7 @@ function Invoke-BridgeAction {
         [switch]$NonInteractive,
 
         [Parameter(Mandatory)]
-        [hashtable]$RunRecord
+        [System.Collections.IDictionary]$RunRecord
     )
 
     Ensure-BridgeDirectory -Path $Config.backupRoot | Out-Null

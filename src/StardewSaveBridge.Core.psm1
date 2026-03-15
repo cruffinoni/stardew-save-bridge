@@ -199,6 +199,7 @@ function New-BridgeRunRecord {
         backupResult      = @{}
         comparisonSummary = @{}
         overwriteTarget   = ''
+        preservedSettings = @{}
         verificationResult = @{}
         finalOutcome      = 'Unknown'
         errors            = @()
@@ -214,7 +215,7 @@ function Write-BridgeRunLog {
         [string]$RepositoryRoot,
 
         [Parameter(Mandatory)]
-        [hashtable]$RunRecord
+        [System.Collections.IDictionary]$RunRecord
     )
 
     $logRoot = Ensure-BridgeDirectory -Path $Config.logRoot
@@ -245,6 +246,7 @@ function Write-BridgeRunLog {
         'Compatibility: {0}' -f (($RunRecord.compatibility | ConvertTo-Json -Compress -Depth 10))
         'Comparison Summary: {0}' -f (($RunRecord.comparisonSummary | ConvertTo-Json -Compress -Depth 10))
         'Backup Result: {0}' -f (($RunRecord.backupResult | ConvertTo-Json -Compress -Depth 10))
+        'Preserved Settings: {0}' -f (($RunRecord.preservedSettings | ConvertTo-Json -Compress -Depth 10))
         'Verification Result: {0}' -f (($RunRecord.verificationResult | ConvertTo-Json -Compress -Depth 10))
     )
 

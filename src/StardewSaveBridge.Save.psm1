@@ -1,5 +1,19 @@
 Set-StrictMode -Version Latest
 
+$script:PreservedSaveSettingNames = @(
+    'uiScale',
+    'zoomLevel',
+    'desiredUIScale',
+    'desiredBaseZoomLevel',
+    'baseZoomLevel',
+    'localCoopBaseZoomLevel',
+    'localCoopDesiredUIScale',
+    'preferredResolutionX',
+    'preferredResolutionY',
+    'fullscreenMode',
+    'windowMode'
+)
+
 function Get-WindowsSaveRoot {
     $appData = $env:APPDATA
 
@@ -55,6 +69,242 @@ function Resolve-MainSaveFile {
     }
 
     return $null
+}
+
+function Test-PreservedSaveSettingName {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Name
+    )
+
+    if ($script:PreservedSaveSettingNames -contains $Name) {
+        return $true
+    }
+
+    return $false
+}
+
+function Test-PreservedSaveSettingPath {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path,
+
+        [Parameter(Mandatory)]
+        [string]$Name
+    )
+
+    if ($Path -match '(^|/)options\[\d+\](/|$)') {
+        return $true
+    }
+
+    return (Test-PreservedSaveSettingName -Name $Name)
+}
+
+function Get-XmlSiblingElementIndex {
+    param(
+        [Parameter(Mandatory)]
+        [System.Xml.XmlElement]$Element
+    )
+
+    $index = 0
+    if (-not $Element.ParentNode) {
+        return 1
+    }
+
+    foreach ($sibling in $Element.ParentNode.ChildNodes) {
+        if ($sibling.NodeType -ne [System.Xml.XmlNodeType]::Element) {
+            continue
+        }
+
+        if ($sibling.Name -ne $Element.Name) {
+            continue
+        }
+
+        $index++
+        if ([object]::ReferenceEquals($sibling, $Element)) {
+            return $index
+        }
+    }
+
+    return $index
+}
+
+function Get-XmlElementIndexedPath {
+    param(
+        [Parameter(Mandatory)]
+        [System.Xml.XmlElement]$Element
+    )
+
+    $segments = New-Object System.Collections.Generic.List[string]
+    $current = $Element
+
+    while ($current) {
+        $pathSegment = '{0}[{1}]' -f $current.Name, (Get-XmlSiblingElementIndex -Element $current)
+        $segments.Add($pathSegment)
+        $current = if ($current.ParentNode -is [System.Xml.XmlElement]) { [System.Xml.XmlElement]$current.ParentNode } else { $null }
+    }
+
+    $pathSegments = $segments.ToArray()
+    [array]::Reverse($pathSegments)
+    return ($pathSegments -join '/')
+}
+
+function Find-XmlElementByIndexedPath {
+    param(
+        [Parameter(Mandatory)]
+        [xml]$Document,
+
+        [Parameter(Mandatory)]
+        [string]$IndexedPath
+    )
+
+    $segments = @($IndexedPath -split '/')
+    if ($segments.Count -eq 0) {
+        return $null
+    }
+
+    $rootMatch = [regex]::Match($segments[0], '^(?<name>[^\[]+)\[(?<index>\d+)\]$')
+    if (-not $rootMatch.Success) {
+        return $null
+    }
+
+    if ($Document.DocumentElement.Name -ne $rootMatch.Groups['name'].Value -or [int]$rootMatch.Groups['index'].Value -ne 1) {
+        return $null
+    }
+
+    $current = $Document.DocumentElement
+    foreach ($segment in $segments | Select-Object -Skip 1) {
+        $match = [regex]::Match($segment, '^(?<name>[^\[]+)\[(?<index>\d+)\]$')
+        if (-not $match.Success) {
+            return $null
+        }
+
+        $targetName = $match.Groups['name'].Value
+        $targetIndex = [int]$match.Groups['index'].Value
+        $currentIndex = 0
+        $next = $null
+
+        foreach ($child in $current.ChildNodes) {
+            if ($child.NodeType -ne [System.Xml.XmlNodeType]::Element) {
+                continue
+            }
+
+            if ($child.Name -ne $targetName) {
+                continue
+            }
+
+            $currentIndex++
+            if ($currentIndex -eq $targetIndex) {
+                $next = [System.Xml.XmlElement]$child
+                break
+            }
+        }
+
+        if (-not $next) {
+            return $null
+        }
+
+        $current = $next
+    }
+
+    return $current
+}
+
+function Get-PreservedSaveSettingsSnapshot {
+    param(
+        [Parameter(Mandatory)]
+        [string]$FolderPath
+    )
+
+    $mainSaveFile = Resolve-MainSaveFile -FolderPath $FolderPath
+    if (-not $mainSaveFile) {
+        return @()
+    }
+
+    [xml]$xml = Get-Content -LiteralPath $mainSaveFile -Raw
+    $snapshot = New-Object System.Collections.Generic.List[object]
+    $optionRoots = @($xml.GetElementsByTagName('options') | Where-Object { $_ -is [System.Xml.XmlElement] })
+
+    foreach ($optionRoot in $optionRoots) {
+        $snapshot.Add([pscustomobject]@{
+            Path = Get-XmlElementIndexedPath -Element ([System.Xml.XmlElement]$optionRoot)
+            Name = $optionRoot.Name
+            OuterXml = $optionRoot.OuterXml
+            IsSubtree = $true
+        })
+    }
+
+    return $snapshot.ToArray()
+}
+
+function Set-PreservedSaveSettingsSnapshot {
+    param(
+        [Parameter(Mandatory)]
+        [string]$FolderPath,
+
+        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
+        [object[]]$Snapshot
+    )
+
+    $mainSaveFile = Resolve-MainSaveFile -FolderPath $FolderPath
+    if (-not $mainSaveFile -or $Snapshot.Count -eq 0) {
+        return [pscustomobject]@{
+            Applied = $false
+            AppliedCount = 0
+            CandidateCount = $Snapshot.Count
+        }
+    }
+
+    [xml]$xml = Get-Content -LiteralPath $mainSaveFile -Raw
+    $appliedCount = 0
+
+    foreach ($item in $Snapshot) {
+        $element = Find-XmlElementByIndexedPath -Document $xml -IndexedPath $item.Path
+        if (-not $element) {
+            continue
+        }
+
+        if ($item.PSObject.Properties.Name -contains 'IsSubtree' -and $item.IsSubtree) {
+            $fragment = New-Object System.Xml.XmlDocument
+            $fragment.LoadXml($item.OuterXml)
+            $replacement = $xml.ImportNode($fragment.DocumentElement, $true)
+            $null = $element.ParentNode.ReplaceChild($replacement, $element)
+            $appliedCount++
+            continue
+        }
+
+        $appliedCount++
+    }
+
+    if ($appliedCount -gt 0) {
+        $xml.Save($mainSaveFile)
+    }
+
+    return [pscustomobject]@{
+        Applied = ($appliedCount -gt 0)
+        AppliedCount = $appliedCount
+        CandidateCount = $Snapshot.Count
+    }
+}
+
+function Sync-SaveSettingsFromReference {
+    param(
+        [Parameter(Mandatory)]
+        [string]$ReferenceFolderPath,
+
+        [Parameter(Mandatory)]
+        [string]$TargetFolderPath
+    )
+
+    $snapshot = @(Get-PreservedSaveSettingsSnapshot -FolderPath $ReferenceFolderPath)
+    $result = Set-PreservedSaveSettingsSnapshot -FolderPath $TargetFolderPath -Snapshot $snapshot
+
+    return [pscustomobject]@{
+        Applied = $result.Applied
+        AppliedCount = $result.AppliedCount
+        CandidateCount = $result.CandidateCount
+    }
 }
 
 function Find-XmlNodeValue {
@@ -458,6 +708,9 @@ Export-ModuleMember -Function @(
     'Get-LocalSaveSlots',
     'Resolve-MainSaveFile',
     'Get-SaveVersionInfo',
+    'Get-PreservedSaveSettingsSnapshot',
+    'Set-PreservedSaveSettingsSnapshot',
+    'Sync-SaveSettingsFromReference',
     'Test-SaveFolder',
     'Get-SaveManifest',
     'Compare-SaveFolders',
