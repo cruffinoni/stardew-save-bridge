@@ -16,4 +16,12 @@ Describe 'CLI parameters' {
         $paramNames | Should -Contain 'Force'
         $errors.Count | Should -Be 0
     }
+
+    It 'allows the daemon action on the root script' {
+        $repoRoot = Split-Path -Path $PSScriptRoot -Parent
+        $scriptPath = Join-Path -Path $repoRoot -ChildPath 'stardew-save-bridge.ps1'
+        $content = Get-Content -LiteralPath $scriptPath -Raw
+
+        $content | Should -Match "ValidateSet\('Inspect', 'UsePC', 'UsePhone', 'RestoreBackup', 'Daemon'\)"
+    }
 }

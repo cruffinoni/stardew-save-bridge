@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('Inspect', 'UsePC', 'UsePhone', 'RestoreBackup')]
+    [ValidateSet('Inspect', 'UsePC', 'UsePhone', 'RestoreBackup', 'Daemon')]
     [string]$Action,
 
     [string]$SaveSlot,

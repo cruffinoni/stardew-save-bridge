@@ -11,6 +11,7 @@ Describe 'UX copy' {
         $labels.Values | Should -Contain 'Use PC save'
         $labels.Values | Should -Contain 'Use Phone save'
         $labels.Values | Should -Contain 'Restore backup'
+        $labels.Values | Should -Contain 'Run sync daemon'
     }
 
     It 'does not contain prohibited transport terms in the centralized labels' {

@@ -7,6 +7,7 @@ Stardew Save Bridge is a Windows-first PowerShell utility for safely moving a St
 - Windows PowerShell 5.1 or PowerShell 7 on Windows
 - `adb` installed and available in `PATH`, or configured through `config/user.json`
 - USB debugging enabled on the Android phone
+- Wireless debugging paired if you want mDNS-based discovery to find the device over the network
 - A Stardew Valley save under `%APPDATA%\StardewValley\Saves`
 
 ## Setup
@@ -25,15 +26,24 @@ Stardew Save Bridge is a Windows-first PowerShell utility for safely moving a St
 
 ### Configure the tool
 
-The first run creates `config/user.json` from `config/default.json`. Update it if you need a custom Android save root, backup location, staging path, preferred device, or UI mode.
+The first run creates `config/user.json` from `config/default.json`. Update it if you need a custom Android save root, backup location, staging path, preferred device, UI mode, wireless daemon settings, or a fixed PC game executable path.
+
+`pcGameExePath` is optional. When it is blank, the tool tries to auto-detect `Stardew Valley.exe` from common Steam and GOG install locations on Windows. The first successful detection is saved back to `config/user.json`. If you move the game later, update `pcGameExePath` to the new executable path.
+
+For the daemon, `daemonIntervalMinutes` is the active setting. The wireless host/port settings are kept for compatibility with older setups:
+
+- `wirelessDeviceHost`: legacy wireless endpoint setting
+- `wirelessDevicePort`: legacy wireless endpoint setting
+- `daemonIntervalMinutes`: how often the daemon checks for changes; default is `30`
 
 ## First-run workflow
 
-1. Connect the phone and confirm `adb devices` shows it as `device`.
-2. Run `.\stardew-save-bridge.ps1`.
-3. Choose `Inspect saves`.
-4. Review the comparison, version hints, and recommendation.
-5. Choose `Use PC save`, `Use Phone save`, or `Restore backup` only after reviewing the confirmation prompt.
+1. Pair wireless debugging if you want network discovery, or connect the phone over USB.
+2. Confirm `adb devices` shows the device as `device` for USB fallback.
+3. Run `.\stardew-save-bridge.ps1`.
+4. Choose `Inspect saves`.
+5. Review the visible `Selected device:` message, comparison, version hints, and recommendation.
+6. Choose `Use PC save`, `Use Phone save`, or `Restore backup` only after reviewing the confirmation prompt.
 
 ## Example commands
 
@@ -43,7 +53,36 @@ The first run creates `config/user.json` from `config/default.json`. Update it i
 .\stardew-save-bridge.ps1 -Action UsePC -SaveSlot "Farm_123456789" -DeviceId "emulator-5554" -Force
 .\stardew-save-bridge.ps1 -Action UsePhone -SaveSlot "Farm_123456789" -DeviceId "emulator-5554" -DryRun
 .\stardew-save-bridge.ps1 -Action RestoreBackup -SaveSlot "Farm_123456789" -BackupId "20260313-200000" -RestoreTarget PC -Force
+.\stardew-save-bridge.ps1 -Action Daemon -NonInteractive
 ```
+
+## Continuous Sync Daemon
+
+The daemon uses the same mDNS-first discovery flow as the interactive workflows to keep PC and phone/tablet saves synchronized in the background.
+
+Behavior:
+
+- It queries `adb mdns services` first and auto-selects the first usable mDNS device.
+- It falls back to USB device discovery when no usable mDNS device is available.
+- It prints the selected device in the console at the start of each cycle.
+- It checks every discovered save slot and syncs only when one side is clearly newer.
+- It backs up the side that will be overwritten before copying.
+- It skips the cycle if no usable mDNS or USB device is available.
+- It skips the cycle if Stardew Valley is running on the PC.
+- It writes a normal run log for each daemon cycle under `logs/`.
+
+Start it with:
+
+```powershell
+.\stardew-save-bridge.ps1 -Action Daemon -NonInteractive
+```
+
+Recommended setup:
+
+1. Pair wireless `adb` with the phone/tablet first.
+2. Confirm `adb mdns services` lists the device if you expect network discovery to be used.
+3. Leave USB debugging enabled if you want the daemon to have a wired fallback.
+4. Start the daemon from Windows PowerShell or PowerShell 7.
 
 ## Makefile shortcuts
 
@@ -102,6 +141,7 @@ The fixtures in `fixtures/` are synthetic and safe to distribute.
 
 ### No device found
 
+- Re-run `adb mdns services` to check whether the device is discoverable over wireless debugging.
 - Confirm the cable supports data transfer.
 - Re-run `adb devices`.
 - Check that USB debugging is enabled.

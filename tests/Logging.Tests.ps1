@@ -15,11 +15,27 @@ Describe 'Run logging' {
         $runRecord = New-BridgeRunRecord -Action 'Inspect' -ConfigPath $config._configPath
         $runRecord.selectedSaveSlot = 'Farm_1'
         $runRecord.detectedPaths = @{ pcRoot = 'C:\Saves'; androidRoot = '/sdcard/Saves' }
+        $runRecord.deviceSelection = @{
+            message = 'Selected device: adb-Secure._adb-tls-connect._tcp (192.168.1.4:39101) via mDNS (auto-selected)'
+        }
+        $runRecord.syncResults = @(
+            [pscustomobject]@{
+                SlotName = 'Farm_1'
+                Status = 'SkippedCompatibility'
+                SourceSide = 'Phone'
+                TargetSide = 'PC'
+                Reason = 'PC game version could not be determined. Set config/user.json -> pcGameExePath to your Stardew Valley executable, or install Stardew Valley in a supported Steam/GOG location.'
+            }
+        )
         $runRecord.finalOutcome = 'Completed'
 
         Write-BridgeRunLog -Config $config -RepositoryRoot $TestDrive -RunRecord $runRecord
 
         @(Get-ChildItem -LiteralPath $config.logRoot -Filter '*.json').Count | Should -Be 1
         @(Get-ChildItem -LiteralPath $config.logRoot -Filter '*.log').Count | Should -Be 1
+        $textLog = Get-Content -LiteralPath @(Get-ChildItem -LiteralPath $config.logRoot -Filter '*.log' | Select-Object -First 1).FullName -Raw
+        $textLog | Should -Match 'Device Selection: Selected device: adb-Secure\._adb-tls-connect\._tcp \(192\.168\.1\.4:39101\) via mDNS \(auto-selected\)'
+        $textLog | Should -Match 'Per-slot Results:'
+        $textLog | Should -Match 'Farm_1: SkippedCompatibility \[Phone->PC\] - PC game version could not be determined\. Set config/user\.json -> pcGameExePath to your Stardew Valley executable, or install Stardew Valley in a supported Steam/GOG location\.'
     }
 }

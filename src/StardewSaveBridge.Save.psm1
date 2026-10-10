@@ -580,6 +580,19 @@ function Compare-SaveFolders {
     }
 }
 
+function Format-BridgeUtcTimestamp {
+    param(
+        [AllowNull()]
+        [datetime]$Timestamp
+    )
+
+    if (-not $Timestamp) {
+        return $null
+    }
+
+    return $Timestamp.ToUniversalTime().ToString('o')
+}
+
 function Get-NewerSideHint {
     param(
         [string]$PCPath,
@@ -602,6 +615,8 @@ function Get-NewerSideHint {
     if (-not $pcLatest -and -not $phoneLatest) {
         return [pscustomobject]@{
             Hint = 'Unknown'
+            ReasonCode = 'NoTimestampData'
+            Message = 'The newer side could not be determined safely because no latest file timestamp could be determined.'
             PC = $null
             Phone = $null
         }
@@ -610,6 +625,8 @@ function Get-NewerSideHint {
     if ($pcLatest -and -not $phoneLatest) {
         return [pscustomobject]@{
             Hint = 'PC'
+            ReasonCode = 'OnlyPCExists'
+            Message = 'Selected the PC save because no phone save exists for this slot.'
             PC = $pcLatest
             Phone = $null
         }
@@ -618,6 +635,8 @@ function Get-NewerSideHint {
     if ($phoneLatest -and -not $pcLatest) {
         return [pscustomobject]@{
             Hint = 'Phone'
+            ReasonCode = 'OnlyPhoneExists'
+            Message = 'Selected the phone save because no PC save exists for this slot.'
             PC = $null
             Phone = $phoneLatest
         }
@@ -626,6 +645,8 @@ function Get-NewerSideHint {
     if ($pcLatest -gt $phoneLatest) {
         return [pscustomobject]@{
             Hint = 'PC'
+            ReasonCode = 'PCTimestampNewer'
+            Message = 'Selected the PC save because its latest file timestamp is newer (PC: {0}; Phone: {1}).' -f (Format-BridgeUtcTimestamp -Timestamp $pcLatest), (Format-BridgeUtcTimestamp -Timestamp $phoneLatest)
             PC = $pcLatest
             Phone = $phoneLatest
         }
@@ -634,6 +655,8 @@ function Get-NewerSideHint {
     if ($phoneLatest -gt $pcLatest) {
         return [pscustomobject]@{
             Hint = 'Phone'
+            ReasonCode = 'PhoneTimestampNewer'
+            Message = 'Selected the phone save because its latest file timestamp is newer (PC: {0}; Phone: {1}).' -f (Format-BridgeUtcTimestamp -Timestamp $pcLatest), (Format-BridgeUtcTimestamp -Timestamp $phoneLatest)
             PC = $pcLatest
             Phone = $phoneLatest
         }
@@ -641,8 +664,184 @@ function Get-NewerSideHint {
 
     return [pscustomobject]@{
         Hint = 'SameTimestamp'
+        ReasonCode = 'SameTimestamp'
+        Message = 'The newer side could not be determined safely because both saves have the same latest file timestamp ({0}).' -f (Format-BridgeUtcTimestamp -Timestamp $pcLatest)
         PC = $pcLatest
         Phone = $phoneLatest
+    }
+}
+
+function New-PCGameVersionResult {
+    param(
+        [AllowNull()]
+        [string]$Raw,
+
+        [AllowNull()]
+        [version]$Parsed,
+
+        [Parameter(Mandatory)]
+        [string]$Source,
+
+        [Parameter(Mandatory)]
+        [string]$Detection,
+
+        [AllowNull()]
+        [string]$ResolvedPath,
+
+        [AllowNull()]
+        [string]$ConfiguredPath,
+
+        [bool]$ShouldPersist,
+
+        [AllowNull()]
+        [string]$Message
+    )
+
+    return [pscustomobject]@{
+        Raw = $Raw
+        Parsed = $Parsed
+        Source = $Source
+        Detection = $Detection
+        ResolvedPath = $ResolvedPath
+        ConfiguredPath = $ConfiguredPath
+        ShouldPersist = $ShouldPersist
+        Message = $Message
+    }
+}
+
+function Format-BridgeQuotedPath {
+    param(
+        [AllowNull()]
+        [string]$Path
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return "''"
+    }
+
+    return "'{0}'" -f $Path
+}
+
+function Get-SteamInstallRoots {
+    $roots = @()
+
+    foreach ($basePath in @(${env:ProgramFiles(x86)}, $env:ProgramFiles)) {
+        if ([string]::IsNullOrWhiteSpace($basePath)) {
+            continue
+        }
+
+        $roots += (Join-Path -Path $basePath -ChildPath 'Steam')
+    }
+
+    return @($roots | Select-Object -Unique)
+}
+
+function Get-SteamLibraryRoots {
+    param(
+        [Parameter(Mandatory)]
+        [string[]]$SteamInstallRoots
+    )
+
+    $libraryRoots = New-Object System.Collections.Generic.List[string]
+
+    foreach ($steamRoot in @($SteamInstallRoots | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)) {
+        $libraryRoots.Add($steamRoot)
+        $libraryFoldersPath = Join-Path -Path $steamRoot -ChildPath 'steamapps/libraryfolders.vdf'
+        if (-not (Test-Path -LiteralPath $libraryFoldersPath -PathType Leaf)) {
+            continue
+        }
+
+        # Capture "path" entries from both the old flat and newer nested libraryfolders.vdf formats.
+        foreach ($line in Get-Content -LiteralPath $libraryFoldersPath) {
+            $match = [regex]::Match($line, '^\s*"path"\s+"(?<path>.+)"\s*$')
+            if (-not $match.Success) {
+                continue
+            }
+
+            $libraryPath = ([regex]::Unescape($match.Groups['path'].Value)).Trim()
+            if (-not [string]::IsNullOrWhiteSpace($libraryPath)) {
+                $libraryRoots.Add($libraryPath)
+            }
+        }
+    }
+
+    return @($libraryRoots | Select-Object -Unique)
+}
+
+function Get-PCGameAutoDetectCandidates {
+    $candidates = New-Object System.Collections.Generic.List[string]
+
+    foreach ($libraryRoot in Get-SteamLibraryRoots -SteamInstallRoots (Get-SteamInstallRoots)) {
+        if ([string]::IsNullOrWhiteSpace($libraryRoot)) {
+            continue
+        }
+
+        $candidates.Add((Join-Path -Path $libraryRoot -ChildPath 'steamapps/common/Stardew Valley/Stardew Valley.exe'))
+    }
+
+    foreach ($basePath in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+        if ([string]::IsNullOrWhiteSpace($basePath)) {
+            continue
+        }
+
+        $candidates.Add((Join-Path -Path $basePath -ChildPath 'GOG Galaxy/Games/Stardew Valley/Stardew Valley.exe'))
+        $candidates.Add((Join-Path -Path $basePath -ChildPath 'GOG Games/Stardew Valley/Stardew Valley.exe'))
+    }
+
+    return @($candidates | Select-Object -Unique)
+}
+
+function Resolve-PCGameExecutablePath {
+    param(
+        [Parameter(Mandatory)]
+        [hashtable]$Config
+    )
+
+    $configuredPath = $null
+    if ($Config.ContainsKey('pcGameExePath')) {
+        $configuredPath = [string]$Config['pcGameExePath']
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($configuredPath)) {
+        if (Test-Path -LiteralPath $configuredPath -PathType Leaf) {
+            $normalizedConfiguredPath = [System.IO.Path]::GetFullPath($configuredPath)
+            return [pscustomobject]@{
+                Status = 'Configured'
+                ResolvedPath = $normalizedConfiguredPath
+                ConfiguredPath = $configuredPath
+                ShouldPersist = $false
+                Message = $null
+            }
+        }
+
+        return [pscustomobject]@{
+            Status = 'MissingPath'
+            ResolvedPath = $null
+            ConfiguredPath = $configuredPath
+            ShouldPersist = $false
+            Message = "Configured pcGameExePath does not exist: $(Format-BridgeQuotedPath -Path $configuredPath). Set config/user.json -> pcGameExePath to the full path to 'Stardew Valley.exe', not the install folder."
+        }
+    }
+
+    foreach ($candidate in Get-PCGameAutoDetectCandidates) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            $normalizedCandidate = [System.IO.Path]::GetFullPath($candidate)
+            return [pscustomobject]@{
+                Status = 'AutoDetected'
+                ResolvedPath = $normalizedCandidate
+                ConfiguredPath = $null
+                ShouldPersist = $true
+                Message = 'PC game executable auto-detected at {0}. Saved to config/user.json.' -f (Format-BridgeQuotedPath -Path $normalizedCandidate)
+            }
+        }
+    }
+
+    return [pscustomobject]@{
+        Status = 'NotConfigured'
+        ResolvedPath = $null
+        ConfiguredPath = $null
+        ShouldPersist = $false
+        Message = 'PC game version could not be determined. Set config/user.json -> pcGameExePath to your Stardew Valley executable, or install Stardew Valley in a supported Steam/GOG location.'
     }
 }
 
@@ -652,29 +851,52 @@ function Get-PCGameVersion {
         [hashtable]$Config
     )
 
-    if ([string]::IsNullOrWhiteSpace($Config.pcGameExePath)) {
-        return [pscustomobject]@{
-            Raw = $null
-            Parsed = $null
-            Source = 'NotConfigured'
-        }
+    $resolution = Resolve-PCGameExecutablePath -Config $Config
+    if ([string]::IsNullOrWhiteSpace($resolution.ResolvedPath)) {
+        return New-PCGameVersionResult `
+            -Raw $null `
+            -Parsed $null `
+            -Source $resolution.Status `
+            -Detection $resolution.Status `
+            -ResolvedPath $null `
+            -ConfiguredPath $resolution.ConfiguredPath `
+            -ShouldPersist:$false `
+            -Message $resolution.Message
     }
 
-    $exePath = $Config.pcGameExePath
-    if (-not (Test-Path -LiteralPath $exePath -PathType Leaf)) {
-        return [pscustomobject]@{
-            Raw = $null
-            Parsed = $null
-            Source = 'MissingPath'
-        }
+    try {
+        $rawVersion = (Get-Item -LiteralPath $resolution.ResolvedPath).VersionInfo.ProductVersion
+    }
+    catch {
+        return New-PCGameVersionResult `
+            -Raw $null `
+            -Parsed $null `
+            -Source $resolution.ResolvedPath `
+            -Detection $resolution.Status `
+            -ResolvedPath $resolution.ResolvedPath `
+            -ConfiguredPath $resolution.ConfiguredPath `
+            -ShouldPersist:$false `
+            -Message ("PC game version could not be determined from {0}. Set config/user.json -> pcGameExePath to the full path to 'Stardew Valley.exe', not the install folder." -f (Format-BridgeQuotedPath -Path $resolution.ResolvedPath))
     }
 
-    $rawVersion = (Get-Item -LiteralPath $exePath).VersionInfo.ProductVersion
-    return [pscustomobject]@{
-        Raw = $rawVersion
-        Parsed = ConvertTo-BridgeVersion -Text $rawVersion
-        Source = $exePath
+    $parsedVersion = ConvertTo-BridgeVersion -Text $rawVersion
+    $message = $resolution.Message
+    $shouldPersist = [bool]$resolution.ShouldPersist
+
+    if (-not $parsedVersion) {
+        $message = 'PC game version could not be determined from {0}. Set config/user.json -> pcGameExePath to the full path to ''Stardew Valley.exe'', not the install folder.' -f (Format-BridgeQuotedPath -Path $resolution.ResolvedPath)
+        $shouldPersist = $false
     }
+
+    return New-PCGameVersionResult `
+        -Raw $rawVersion `
+        -Parsed $parsedVersion `
+        -Source $resolution.ResolvedPath `
+        -Detection $resolution.Status `
+        -ResolvedPath $resolution.ResolvedPath `
+        -ConfiguredPath $resolution.ConfiguredPath `
+        -ShouldPersist:$shouldPersist `
+        -Message $message
 }
 
 function Test-VersionCompatibility {

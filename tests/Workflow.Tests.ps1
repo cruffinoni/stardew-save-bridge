@@ -1,7 +1,116 @@
 BeforeAll {
     $repoRoot = Split-Path -Path $PSScriptRoot -Parent
     Import-Module (Join-Path -Path $repoRoot -ChildPath 'src/StardewSaveBridge.Core.psm1') -Force
+    Import-Module (Join-Path -Path $repoRoot -ChildPath 'src/StardewSaveBridge.Adb.psm1') -Force
     Import-Module (Join-Path -Path $repoRoot -ChildPath 'src/StardewSaveBridge.Workflow.psm1') -Force
+}
+
+Describe 'Workflow device selection' {
+    It 'auto-selects the first mdns device and marks it as visible to the user' {
+        InModuleScope StardewSaveBridge.Workflow {
+            $config = @{
+                preferredDeviceId = ''
+                uiMode = 'Text'
+            }
+
+            Mock Test-AdbAvailable { $true } -ModuleName StardewSaveBridge.Workflow
+            Mock Get-AdbMdnsDeviceList {
+                @(
+                    [pscustomobject]@{
+                        Id = '192.168.1.4:39101'
+                        State = 'device'
+                        DiscoverySource = 'mDNS'
+                        ServiceName = 'adb-Secure._adb-tls-connect._tcp'
+                        ServiceType = '_adb-tls-connect._tcp'
+                        Address = '192.168.1.4'
+                        Port = 39101
+                        DisplayName = 'adb-Secure._adb-tls-connect._tcp (192.168.1.4:39101)'
+                        SelectionReason = ''
+                    }
+                    [pscustomobject]@{
+                        Id = '192.168.1.5:39101'
+                        State = 'device'
+                        DiscoverySource = 'mDNS'
+                        ServiceName = 'adb-Second._adb-tls-connect._tcp'
+                        ServiceType = '_adb-tls-connect._tcp'
+                        Address = '192.168.1.5'
+                        Port = 39101
+                        DisplayName = 'adb-Second._adb-tls-connect._tcp (192.168.1.5:39101)'
+                        SelectionReason = ''
+                    }
+                )
+            } -ModuleName StardewSaveBridge.Workflow
+            Mock Get-AdbDeviceList { @() } -ModuleName StardewSaveBridge.Workflow
+
+            $result = Resolve-SelectedDevice -Config $config -NonInteractive
+
+            $result.Id | Should -Be '192.168.1.4:39101'
+            $result.SelectionReason | Should -Be 'AutoSelectedMdns'
+            (Get-BridgeDeviceSelectionSummaryLine -Device $result) | Should -Be 'Selected device: adb-Secure._adb-tls-connect._tcp (192.168.1.4:39101) via mDNS (auto-selected)'
+        }
+    }
+
+    It 'prefers a saved device id before mdns auto-selection' {
+        InModuleScope StardewSaveBridge.Workflow {
+            $config = @{
+                preferredDeviceId = 'device-2'
+                uiMode = 'Text'
+            }
+
+            Mock Test-AdbAvailable { $true } -ModuleName StardewSaveBridge.Workflow
+            Mock Get-AdbMdnsDeviceList {
+                @([pscustomobject]@{
+                    Id = '192.168.1.4:39101'
+                    State = 'device'
+                    DiscoverySource = 'mDNS'
+                    ServiceName = 'adb-Secure._adb-tls-connect._tcp'
+                    ServiceType = '_adb-tls-connect._tcp'
+                    Address = '192.168.1.4'
+                    Port = 39101
+                    DisplayName = 'adb-Secure._adb-tls-connect._tcp (192.168.1.4:39101)'
+                    SelectionReason = ''
+                })
+            } -ModuleName StardewSaveBridge.Workflow
+            Mock Get-AdbDeviceList {
+                @([pscustomobject]@{ Id = 'device-2'; State = 'device' })
+            } -ModuleName StardewSaveBridge.Workflow
+
+            $result = Resolve-SelectedDevice -Config $config -NonInteractive
+
+            $result.Id | Should -Be 'device-2'
+            $result.DiscoverySource | Should -Be 'USB'
+            $result.SelectionReason | Should -Be 'PreferredDeviceId'
+        }
+    }
+
+    It 'falls back to usb selection labels when mdns is unavailable' {
+        InModuleScope StardewSaveBridge.Workflow {
+            $config = @{
+                preferredDeviceId = ''
+                uiMode = 'Text'
+            }
+
+            Mock Test-AdbAvailable { $true } -ModuleName StardewSaveBridge.Workflow
+            Mock Get-AdbMdnsDeviceList { @() } -ModuleName StardewSaveBridge.Workflow
+            Mock Get-AdbDeviceList {
+                @(
+                    [pscustomobject]@{ Id = 'device-1'; State = 'device' },
+                    [pscustomobject]@{ Id = 'device-2'; State = 'device' }
+                )
+            } -ModuleName StardewSaveBridge.Workflow
+            Mock Select-BridgeItem {
+                param($Items, $Title, $LabelScript, $UiMode, $NonInteractive)
+                $Title | Should -Be 'Choose a phone device'
+                (& $LabelScript $Items[0]) | Should -Be 'device-1 [device] via USB'
+                return $Items[1]
+            } -ModuleName StardewSaveBridge.Workflow
+
+            $result = Resolve-SelectedDevice -Config $config
+
+            $result.Id | Should -Be 'device-2'
+            $result.SelectionReason | Should -Be 'UsbPromptSelection'
+        }
+    }
 }
 
 Describe 'Workflow slot selection' {
@@ -75,7 +184,10 @@ Describe 'Workflow slot selection' {
 Describe 'Inspect recommendation' {
     It 'does not suggest a side when saves are identical' {
         InModuleScope StardewSaveBridge.Workflow {
-            $result = Get-InspectRecommendation -OverallStatus 'Identical' -NewerSideHint 'Phone'
+            $result = Get-InspectRecommendation -OverallStatus 'Identical' -NewerSideHint ([pscustomobject]@{
+                Hint = 'Phone'
+                Message = 'Selected the phone save because its latest file timestamp is newer (PC: 2026-03-14T08:00:00.0000000Z; Phone: 2026-03-14T12:00:00.0000000Z).'
+            })
 
             $result | Should -Be 'Saves are identical. No handoff is needed.'
         }
@@ -83,9 +195,23 @@ Describe 'Inspect recommendation' {
 
     It 'still suggests a likely newer side when saves differ' {
         InModuleScope StardewSaveBridge.Workflow {
-            $result = Get-InspectRecommendation -OverallStatus 'Different' -NewerSideHint 'Phone'
+            $result = Get-InspectRecommendation -OverallStatus 'Different' -NewerSideHint ([pscustomobject]@{
+                Hint = 'Phone'
+                Message = 'Selected the phone save because its latest file timestamp is newer (PC: 2026-03-14T08:00:00.0000000Z; Phone: 2026-03-14T12:00:00.0000000Z).'
+            })
 
-            $result | Should -Be 'Phone save appears newer. Choose the version you want to keep.'
+            $result | Should -Be 'Selected the phone save because its latest file timestamp is newer (PC: 2026-03-14T08:00:00.0000000Z; Phone: 2026-03-14T12:00:00.0000000Z). Choose the version you want to keep.'
+        }
+    }
+
+    It 'explains ambiguous recommendations when the newer side cannot be determined' {
+        InModuleScope StardewSaveBridge.Workflow {
+            $result = Get-InspectRecommendation -OverallStatus 'Different' -NewerSideHint ([pscustomobject]@{
+                Hint = 'SameTimestamp'
+                Message = 'The newer side could not be determined safely because both saves have the same latest file timestamp (2026-03-14T12:00:00.0000000Z).'
+            })
+
+            $result | Should -Be 'The newer side could not be determined safely because both saves have the same latest file timestamp (2026-03-14T12:00:00.0000000Z). Review the comparison before choosing the version you want to keep.'
         }
     }
 }

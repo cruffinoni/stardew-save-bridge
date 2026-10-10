@@ -5,6 +5,7 @@ $script:BridgeUiLabels = [ordered]@{
     UsePCSave            = 'Use PC save'
     UsePhoneSave         = 'Use Phone save'
     RestoreBackup        = 'Restore backup'
+    RunSyncDaemon        = 'Run sync daemon'
     Cancel               = 'Cancel'
     ConfirmOverwrite     = 'Confirm overwrite'
     BackUpCurrentVersion = 'Back up current version'
@@ -29,6 +30,9 @@ function Get-DefaultBridgeConfig {
         stagingDirectory   = 'staging'
         preferredSaveSlot  = ''
         preferredDeviceId  = ''
+        wirelessDeviceHost = ''
+        wirelessDevicePort = 0
+        daemonIntervalMinutes = 30
         uiMode             = 'Text'
         allowUnsafeOverride = $false
         pcGameExePath      = ''
@@ -195,12 +199,16 @@ function New-BridgeRunRecord {
         selectedSaveSlot  = ''
         detectedPaths     = @{}
         connectedDeviceId = ''
+        deviceSelection   = @{}
         compatibility     = @{}
         backupResult      = @{}
         comparisonSummary = @{}
         overwriteTarget   = ''
         preservedSettings = @{}
         verificationResult = @{}
+        cycleDeviceEndpoint = ''
+        syncResults       = @()
+        notes             = @()
         finalOutcome      = 'Unknown'
         errors            = @()
     }
@@ -215,7 +223,9 @@ function Write-BridgeRunLog {
         [string]$RepositoryRoot,
 
         [Parameter(Mandatory)]
-        [System.Collections.IDictionary]$RunRecord
+        [System.Collections.IDictionary]$RunRecord,
+
+        [switch]$PassThru
     )
 
     $logRoot = Ensure-BridgeDirectory -Path $Config.logRoot
@@ -228,11 +238,25 @@ function Write-BridgeRunLog {
     $RunRecord['finishedAt'] = (Get-Date).ToString('o')
     $RunRecord | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $jsonPath -Encoding UTF8
 
+    $deviceSelectionMessage = ''
+    if ($RunRecord.Contains('deviceSelection') -and $RunRecord.deviceSelection) {
+        if ($RunRecord.deviceSelection -is [System.Collections.IDictionary]) {
+            if ($RunRecord.deviceSelection.Contains('message') -and -not [string]::IsNullOrWhiteSpace([string]$RunRecord.deviceSelection['message'])) {
+                $deviceSelectionMessage = [string]$RunRecord.deviceSelection['message']
+            }
+        }
+        elseif ($RunRecord.deviceSelection.PSObject.Properties.Name -contains 'message' -and -not [string]::IsNullOrWhiteSpace([string]$RunRecord.deviceSelection.message)) {
+            $deviceSelectionMessage = [string]$RunRecord.deviceSelection.message
+        }
+    }
+
     $lines = @(
         'Timestamp: {0}' -f $RunRecord.startedAt
         'Mode: {0}' -f $RunRecord.modeSelected
         'Save Slot: {0}' -f $RunRecord.selectedSaveSlot
         'Device: {0}' -f $RunRecord.connectedDeviceId
+        'Device Selection: {0}' -f $deviceSelectionMessage
+        'Endpoint: {0}' -f $RunRecord.cycleDeviceEndpoint
         'Overwrite Target: {0}' -f $RunRecord.overwriteTarget
         'Outcome: {0}' -f $RunRecord.finalOutcome
         'Detected Paths:'
@@ -250,6 +274,29 @@ function Write-BridgeRunLog {
         'Verification Result: {0}' -f (($RunRecord.verificationResult | ConvertTo-Json -Compress -Depth 10))
     )
 
+    if ($RunRecord.syncResults.Count -gt 0) {
+        $lines += 'Per-slot Results:'
+        foreach ($syncResult in $RunRecord.syncResults) {
+            $slotName = if ([string]::IsNullOrWhiteSpace($syncResult.SlotName)) { 'unknown-slot' } else { $syncResult.SlotName }
+            $status = if ([string]::IsNullOrWhiteSpace($syncResult.Status)) { 'Unknown' } else { $syncResult.Status }
+            $direction = if ($syncResult.SourceSide -and $syncResult.TargetSide) { ' [{0}->{1}]' -f $syncResult.SourceSide, $syncResult.TargetSide } else { '' }
+            $detail = if ($syncResult.Reason) { $syncResult.Reason } else { 'No additional detail was recorded.' }
+            $lines += '  {0}: {1}{2} - {3}' -f $slotName, $status, $direction, $detail
+        }
+
+        $lines += 'Sync Results JSON: {0}' -f (($RunRecord.syncResults | ConvertTo-Json -Compress -Depth 10))
+    }
+    else {
+        $lines += 'Sync Results JSON: {0}' -f (($RunRecord.syncResults | ConvertTo-Json -Compress -Depth 10))
+    }
+
+    if ($RunRecord.notes.Count -gt 0) {
+        $lines += 'Notes:'
+        foreach ($note in $RunRecord.notes) {
+            $lines += '  {0}' -f $note
+        }
+    }
+
     if ($RunRecord.errors.Count -gt 0) {
         $lines += 'Errors:'
         foreach ($message in $RunRecord.errors) {
@@ -258,6 +305,13 @@ function Write-BridgeRunLog {
     }
 
     $lines | Set-Content -LiteralPath $textPath -Encoding UTF8
+
+    if ($PassThru) {
+        return [pscustomobject]@{
+            JsonPath = $jsonPath
+            TextPath = $textPath
+        }
+    }
 }
 
 function Copy-BridgeDirectory {
